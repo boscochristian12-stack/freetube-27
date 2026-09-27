@@ -71,7 +71,7 @@ final class VideoService: VideoServicing {
                 youtubeModel: client.tvHtmlModel,
                 data: [.query: id]
             )
-            let info = try Self.decipheredVideoInfo(from: response, id: id, recommended: [], log: log)
+            let info = Self.videoInfo(from: response, id: id, recommended: [])
             log.info("fetchInfo[TVHTML5] ok id=\(id, privacy: .public) hls=\(info.streamingURL != nil, privacy: .public) formats=\(info.formats.count, privacy: .public)")
             return info
         } catch {
