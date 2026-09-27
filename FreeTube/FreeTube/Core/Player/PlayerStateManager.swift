@@ -447,19 +447,18 @@ final class PlayerStateManager {
     private func resolveStreamingURL(videoID: String, quality: VideoQuality) async -> URL? {
         let service = VideoService()
 
-        // Tier 1: YouTubeKit's HLS manifest. VideoInfosResponse already uses its native
-        // JavaScriptCore player solver to decode the HLS n-parameter before returning it.
-        if let info = try? await service.fetchInfo(id: videoID) {
-            if let hls = info.streamingURL {
+        // Use the detailed YouTubeKit response for playback. It creates the native JSC player
+        // and explicitly calls deciphersURLs(), which turns signatureCipher/n-protected format
+        // metadata into URLs AVPlayer can actually request.
+        if let result = try? await service.fetchInfoWithFormats(id: videoID) {
+            if let hls = result.info.streamingURL {
                 log.info("resolveStreamingURL: YouTubeKit HLS available id=\\(videoID, privacy: .public)")
                 return hls
             }
 
-            // Tier 2: explicitly deciphered muxed formats. This is still remote playback;
-            // no file is downloaded or muxed locally.
-            logFormats(videoID: videoID, source: "IOS-JSC", formats: info.formats)
+            logFormats(videoID: videoID, source: "IOS-JSC", formats: result.formats)
             if let progressive = Self.pickProgressiveURL(
-                from: info.formats,
+                from: result.formats,
                 maxHeight: quality.heightCap ?? .max
             ) {
                 log.info("resolveStreamingURL: YouTubeKit deciphered progressive URL available id=\\(videoID, privacy: .public)")
@@ -467,20 +466,19 @@ final class PlayerStateManager {
             }
         }
 
-        // Tier 3/4: repeat with the TVHTML5 client. Its response also goes through YouTubeKit's
-        // JSC deciphering path, but the client identity can expose a different set of streams.
+        // Keep the TVHTML5 HLS fallback. Its VideoInfosResponse also runs YouTubeKit's
+        // JavaScriptCore HLS n-parameter decoder.
         if let info = try? await service.fetchInfoViaTVHTML5(id: videoID) {
             if let hls = info.streamingURL {
                 log.info("resolveStreamingURL: TVHTML5 HLS available id=\\(videoID, privacy: .public)")
                 return hls
             }
-
             logFormats(videoID: videoID, source: "TVHTML5-JSC", formats: info.formats)
             if let progressive = Self.pickProgressiveURL(
                 from: info.formats,
                 maxHeight: quality.heightCap ?? .max
             ) {
-                log.info("resolveStreamingURL: TVHTML5 deciphered progressive URL available id=\\(videoID, privacy: .public)")
+                log.info("resolveStreamingURL: TVHTML5 progressive URL available id=\\(videoID, privacy: .public)")
                 return progressive
             }
         }
