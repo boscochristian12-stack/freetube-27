@@ -8,6 +8,8 @@ on:
       - 'FreeTube/FreeTube/Core/JavaScript/JSEvaluator.swift'
       - 'FreeTube/FreeTube/App/RootView.swift'
       - 'FreeTube/FreeTube/Core/JavaScript/PythonJSBridge.swift'
+      - 'FreeTube/FreeTube/Core/Networking/VideoService.swift'
+      - 'FreeTube/FreeTube/Core/Player/PlayerStateManager.swift'
       - 'FreeTube/FreeTube.xcodeproj/project.pbxproj'
       - '.github/workflows/build-ipa.yml'
 
