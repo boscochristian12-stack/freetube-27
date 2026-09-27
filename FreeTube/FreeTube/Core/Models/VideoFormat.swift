@@ -12,4 +12,5 @@ struct VideoFormat: Identifiable, Hashable, Sendable {
     let isVideoOnly: Bool
     let isAudioOnly: Bool
     let containsBothTracks: Bool
+    let isDefaultAudioTrack: Bool
 }

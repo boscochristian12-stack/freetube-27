@@ -207,7 +207,8 @@ enum Mappers {
                 audioSampleRate: nil,
                 isVideoOnly: true,
                 isAudioOnly: false,
-                containsBothTracks: false
+                containsBothTracks: false,
+                isDefaultAudioTrack: false
             )
         }
         if let audio = yt as? AudioOnlyFormat {
@@ -221,7 +222,8 @@ enum Mappers {
                 audioSampleRate: audio.audioSampleRate,
                 isVideoOnly: false,
                 isAudioOnly: true,
-                containsBothTracks: false
+                containsBothTracks: false,
+                isDefaultAudioTrack: audio.formatLocaleInfos?.isDefaultAudioFormat ?? false
             )
         }
         return VideoFormat(
@@ -234,7 +236,8 @@ enum Mappers {
             audioSampleRate: nil,
             isVideoOnly: false,
             isAudioOnly: false,
-            containsBothTracks: true
+            containsBothTracks: true,
+            isDefaultAudioTrack: false
         )
     }
 }

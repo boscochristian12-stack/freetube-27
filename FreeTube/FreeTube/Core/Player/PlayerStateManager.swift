@@ -50,7 +50,6 @@ final class PlayerStateManager {
     // MARK: - Collaborators
 
     let queue: QueueManager
-    private let resolver: any PlaybackResolving
     private let preferences: UserPreferences
     private let log = AppLog(subsystem: "com.leshko.freetube", category: "PlayerStateManager")
 
@@ -74,11 +73,9 @@ final class PlayerStateManager {
     private var defaultRateObservation: NSKeyValueObservation?
     init(
         queue: QueueManager = QueueManager(),
-        resolver: any PlaybackResolving = PlaybackResolver(),
         preferences: UserPreferences = UserPreferences()
     ) {
         self.queue = queue
-        self.resolver = resolver
         self.preferences = preferences
         // Keep the audio track running when the player view goes off-screen (popup minimize, app
         // backgrounded). Without this, AVPlayer pauses video tracks as soon as their pixel buffer
@@ -170,8 +167,7 @@ final class PlayerStateManager {
         log.info("load(\(video.id, privacy: .public)) autoplay=\(autoplay, privacy: .public) skipRecs=\(skipRecommendations, privacy: .public)")
         queueAcceptsRecommendations = !skipRecommendations
         // Pause and tear down anything currently playing. Otherwise we'd keep streaming audio from
-        // the previous video while the new one's file is downloading — which is what the user kept
-        // hearing when they tapped "next" mid-download.
+        // the previous video while the new video's remote stream is resolving.
         if isPlaying {
             log.info("load: pausing current playback before resolving new video")
             pause()
@@ -372,27 +368,26 @@ final class PlayerStateManager {
     private func resolveAndPlay(video: Video, autoplay: Bool, skipRecommendations: Bool = false) async {
         log.info("resolveAndPlay: start for \\(video.id, privacy: .public)")
 
-        // Normal watching must be true streaming: ask YouTubeKit for the HLS manifest first,
-        // then fall back to a deciphered muxed progressive URL. We deliberately do NOT call
-        // DownloadManager.ensureDownloaded() here; Downloads are an explicit user action.
+        // Normal watching must be true streaming: ask YouTubeKit for HLS first, then use a
+        // deciphered progressive URL or compose separate remote audio/video assets. We deliberately
+        // do NOT call DownloadManager.ensureDownloaded() here; Downloads are an explicit user action.
         loadState = .resolving
-        let playbackURL: URL
+        let item: AVPlayerItem
         do {
-            guard let streamURL = await resolveStreamingURL(
+            guard let streamItem = await resolveStreamingItem(
                 videoID: video.id,
                 quality: preferences.preferredQuality
             ) else {
                 throw YouTubeServiceError.streamExtractionFailed
             }
-            playbackURL = streamURL
-            log.info("resolveAndPlay: remote streaming URL selected (no local download)")
+            item = streamItem
+            log.info("resolveAndPlay: remote AVPlayer item selected (no local download)")
         } catch {
             log.error("resolveAndPlay: remote streaming resolution FAILED for \\(video.id, privacy: .public): \\(String(describing: error), privacy: .public)")
             loadState = .failed((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
             return
         }
 
-        let item = AVPlayerItem(url: playbackURL)
         loadItem(item)
         loadState = .readyToPlay
         updateNowPlaying()
@@ -406,54 +401,88 @@ final class PlayerStateManager {
         }
     }
 
-    /// Last-ditch URL resolver. Walks four tiers, returning the first one that produces a URL
-    /// `AVPlayer` can open directly:
+    /// Resolves a remote AVPlayer item. Tries the streaming sources in this order:
     ///   1. iOS-client HLS manifest (adaptive bitrate, best playback experience)
-    ///   2. iOS-client progressive MP4 (muxed audio+video, no n-decoding needed)
-    ///   3. TVHTML5 HLS manifest
-    ///   4. TVHTML5 progressive MP4
+    ///   2. iOS-client progressive MP4 (muxed audio+video)
+    ///   3. iOS-client adaptive MP4 video+audio assets composed for remote playback
+    ///   4. TVHTML5 HLS, progressive, or adaptive MP4
     ///
     /// Why HLS is preferred: HLS chunks use short-lived signatures attached to the manifest
     /// rather than the player.js-derived `n` cipher, and YouTube doesn't typically PoT-stamp
-    /// HLS the way it does DASH. When HLS isn't exposed (some kids/family content), the iOS
-    /// client's `defaultFormats` still include direct progressive URLs that work without the
-    /// player.js scrape — that's our second tier. Returns nil only when all four tiers fail.
-    private func resolveStreamingURL(videoID: String, quality: VideoQuality) async -> URL? {
+    /// HLS the way it does DASH. When no HLS or muxed format is exposed, separate MP4 video and
+    /// audio assets can be played and sought through an `AVMutableComposition`; neither asset is
+    /// saved locally.
+    private func resolveStreamingItem(videoID: String, quality: VideoQuality) async -> AVPlayerItem? {
         let service = VideoService()
 
         // Use the detailed YouTubeKit response for playback. It creates the native JSC player
         // and explicitly calls deciphersURLs(), which turns signatureCipher/n-protected format
         // metadata into URLs AVPlayer can actually request.
         if let result = try? await service.fetchInfoWithFormats(id: videoID) {
-            if let hls = result.info.streamingURL {
+            if quality != .audioOnly,
+               let hls = result.info.streamingURL {
                 log.info("resolveStreamingURL: YouTubeKit HLS available id=\\(videoID, privacy: .public)")
-                return hls
+                return Self.makeHLSItem(url: hls, formats: result.formats, quality: quality)
             }
 
             logFormats(videoID: videoID, source: "IOS-JSC", formats: result.formats)
+            if quality == .audioOnly,
+               let audioURL = Self.pickAudioOnlyURL(from: result.formats) {
+                log.info("resolveStreamingURL: YouTubeKit audio-only URL available id=\\(videoID, privacy: .public)")
+                return AVPlayerItem(url: audioURL)
+            }
             if let progressive = Self.pickProgressiveURL(
                 from: result.formats,
                 maxHeight: quality.heightCap ?? .max
             ) {
                 log.info("resolveStreamingURL: YouTubeKit deciphered progressive URL available id=\\(videoID, privacy: .public)")
-                return progressive
+                return AVPlayerItem(url: progressive)
+            }
+            if quality != .audioOnly,
+               let (video, audio) = Self.pickAdaptivePair(
+                   from: result.formats,
+                   maxHeight: quality.heightCap ?? .max
+               ) {
+                do {
+                    let item = try await Self.makeRemoteComposition(video: video, audio: audio)
+                    log.info("resolveStreamingURL: remote adaptive video+audio composition ready id=\\(videoID, privacy: .public) height=\\(video.height ?? -1, privacy: .public)")
+                    return item
+                } catch {
+                    log.error("resolveStreamingURL: remote adaptive composition failed id=\\(videoID, privacy: .public): \\(String(describing: error), privacy: .public)")
+                }
             }
         }
 
         // Keep the TVHTML5 HLS fallback. Its VideoInfosResponse also runs YouTubeKit's
         // JavaScriptCore HLS n-parameter decoder.
         if let info = try? await service.fetchInfoViaTVHTML5(id: videoID) {
-            if let hls = info.streamingURL {
+            if quality != .audioOnly,
+               let hls = info.streamingURL {
                 log.info("resolveStreamingURL: TVHTML5 HLS available id=\\(videoID, privacy: .public)")
-                return hls
+                return Self.makeHLSItem(url: hls, formats: info.formats, quality: quality)
             }
             logFormats(videoID: videoID, source: "TVHTML5-JSC", formats: info.formats)
+            if quality == .audioOnly,
+               let audioURL = Self.pickAudioOnlyURL(from: info.formats) {
+                return AVPlayerItem(url: audioURL)
+            }
             if let progressive = Self.pickProgressiveURL(
                 from: info.formats,
                 maxHeight: quality.heightCap ?? .max
             ) {
                 log.info("resolveStreamingURL: TVHTML5 progressive URL available id=\\(videoID, privacy: .public)")
-                return progressive
+                return AVPlayerItem(url: progressive)
+            }
+            if quality != .audioOnly,
+               let (video, audio) = Self.pickAdaptivePair(
+                   from: info.formats,
+                   maxHeight: quality.heightCap ?? .max
+               ) {
+                do {
+                    return try await Self.makeRemoteComposition(video: video, audio: audio)
+                } catch {
+                    log.error("resolveStreamingURL: TVHTML5 remote adaptive composition failed id=\\(videoID, privacy: .public): \\(String(describing: error), privacy: .public)")
+                }
             }
         }
 
@@ -489,6 +518,100 @@ final class PlayerStateManager {
             .sorted { ($0.height ?? 0) > ($1.height ?? 0) }
             .first?
             .url
+    }
+
+    /// Creates a remote HLS item and asks AVFoundation to cap its selected rendition when the
+    /// user chose a fixed quality. `.auto` leaves the cap unset so AVPlayer can adapt to bandwidth.
+    private static func makeHLSItem(url: URL, formats: [VideoFormat], quality: VideoQuality) -> AVPlayerItem {
+        let item = AVPlayerItem(url: url)
+        guard let heightCap = quality.heightCap, heightCap > 0 else { return item }
+
+        let preferredFormat = formats
+            .filter { ($0.isVideoOnly || $0.containsBothTracks) && $0.height != nil && $0.width != nil }
+            .filter { ($0.height ?? .max) <= heightCap }
+            .sorted { ($0.height ?? 0) > ($1.height ?? 0) }
+            .first
+        let resolution = preferredFormat.flatMap { format -> CGSize? in
+            guard let width = format.width, let height = format.height else { return nil }
+            return CGSize(width: CGFloat(width), height: CGFloat(height))
+        } ?? CGSize(width: CGFloat(heightCap) * 16.0 / 9.0, height: CGFloat(heightCap))
+        item.preferredMaximumResolution = resolution
+        return item
+    }
+
+    /// Picks compatible remote MP4 video-only and audio-only formats. YouTube's adaptive
+    /// formats are separate files at high resolutions; AVFoundation combines them as references
+    /// to remote assets so AVPlayer can buffer and seek without saving either stream to disk.
+    private static func pickAdaptivePair(from formats: [VideoFormat], maxHeight: Int) -> (VideoFormat, VideoFormat)? {
+        let video = formats
+            .filter { $0.isVideoOnly && $0.url != nil && $0.mimeType == "video/mp4" }
+            .filter { ($0.height ?? .max) <= maxHeight }
+            .sorted {
+                if $0.height != $1.height { return ($0.height ?? 0) > ($1.height ?? 0) }
+                return ($0.bitrate ?? 0) > ($1.bitrate ?? 0)
+            }
+            .first
+        let audio = formats
+            .filter { $0.isAudioOnly && $0.url != nil && $0.mimeType == "audio/mp4" }
+            .sorted {
+                if $0.isDefaultAudioTrack != $1.isDefaultAudioTrack { return $0.isDefaultAudioTrack }
+                return ($0.bitrate ?? 0) > ($1.bitrate ?? 0)
+            }
+            .first
+        guard let video, let audio else { return nil }
+        return (video, audio)
+    }
+
+    private static func pickAudioOnlyURL(from formats: [VideoFormat]) -> URL? {
+        formats
+            .filter { $0.isAudioOnly && $0.mimeType == "audio/mp4" && $0.url != nil }
+            .sorted {
+                if $0.isDefaultAudioTrack != $1.isDefaultAudioTrack { return $0.isDefaultAudioTrack }
+                return ($0.bitrate ?? 0) > ($1.bitrate ?? 0)
+            }
+            .first?
+            .url
+    }
+
+    private static func makeRemoteComposition(video: VideoFormat, audio: VideoFormat) async throws -> AVPlayerItem {
+        guard let videoURL = video.url, let audioURL = audio.url else {
+            throw YouTubeServiceError.streamExtractionFailed
+        }
+        let videoAsset = AVURLAsset(url: videoURL)
+        let audioAsset = AVURLAsset(url: audioURL)
+        async let videoTracks = videoAsset.loadTracks(withMediaType: .video)
+        async let audioTracks = audioAsset.loadTracks(withMediaType: .audio)
+        async let videoDuration = videoAsset.load(.duration)
+        async let audioDuration = audioAsset.load(.duration)
+        let (sourceVideoTracks, sourceAudioTracks, videoTime, audioTime) = try await (
+            videoTracks,
+            audioTracks,
+            videoDuration,
+            audioDuration
+        )
+        guard let sourceVideoTrack = sourceVideoTracks.first,
+              let sourceAudioTrack = sourceAudioTracks.first else {
+            throw YouTubeServiceError.streamExtractionFailed
+        }
+        let durationSeconds = min(videoTime.seconds, audioTime.seconds)
+        guard durationSeconds.isFinite, durationSeconds > 0 else {
+            throw YouTubeServiceError.streamExtractionFailed
+        }
+        let duration = CMTime(seconds: durationSeconds, preferredTimescale: 600)
+        let range = CMTimeRange(start: .zero, duration: duration)
+        let composition = AVMutableComposition()
+        guard let videoTrack = composition.addMutableTrack(
+            withMediaType: .video,
+            preferredTrackID: kCMPersistentTrackID_Invalid
+        ), let audioTrack = composition.addMutableTrack(
+            withMediaType: .audio,
+            preferredTrackID: kCMPersistentTrackID_Invalid
+        ) else {
+            throw YouTubeServiceError.streamExtractionFailed
+        }
+        try videoTrack.insertTimeRange(range, of: sourceVideoTrack, at: .zero)
+        try audioTrack.insertTimeRange(range, of: sourceAudioTrack, at: .zero)
+        return AVPlayerItem(asset: composition)
     }
 
     /// Fetches `MoreVideoInfosResponse` for the current video and appends the recommended videos to

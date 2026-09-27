@@ -16,7 +16,7 @@ enum VideoQuality: String, CaseIterable, Identifiable, Sendable {
 
     var heightCap: Int? {
         switch self {
-        case .auto: return 1080
+        case .auto: return nil
         case .p144: return 144
         case .p240: return 240
         case .p360: return 360
