@@ -53,7 +53,7 @@ final class VideoService: VideoServicing {
                 youtubeModel: client.model,
                 data: [.query: id]
             )
-            let info = try Self.decipheredVideoInfo(from: response, id: id, recommended: [], log: log)
+            let info = Self.videoInfo(from: response, id: id, recommended: [])
             log.info("fetchInfo[IOS] ok id=\(id, privacy: .public) hls=\(info.streamingURL != nil, privacy: .public) formats=\(info.formats.count, privacy: .public)")
             return info
         } catch {
@@ -154,31 +154,6 @@ final class VideoService: VideoServicing {
     }
 
     // MARK: - Mapping helpers
-
-    /// Explicitly run YouTubeKit's native JavaScriptCore URL deciphering for progressive/adaptive
-    /// formats. VideoInfosResponse already uses the same player to decode the HLS n parameter.
-    private static func decipheredVideoInfo(
-        from response: VideoInfosResponse,
-        id: String,
-        recommended: [Video],
-        log: AppLog
-    ) throws -> VideoInfo {
-        var detailed = VideoInfosWithDownloadFormatsResponse(
-            defaultFormats: response.defaultFormats,
-            downloadFormats: response.downloadFormats,
-            videoInfos: response
-        )
-        if let player = response.player {
-            try detailed.deciphersURLs(player: player)
-            log.info("YouTubeKit JSC URL decipher succeeded id=\(id, privacy: .public)")
-        } else {
-            log.warning("YouTubeKit response has no player; format URLs may remain unavailable id=\(id, privacy: .public)")
-        }
-        var decipheredResponse = detailed.videoInfos
-        decipheredResponse.defaultFormats = detailed.defaultFormats
-        decipheredResponse.downloadFormats = detailed.downloadFormats
-        return Self.videoInfo(from: decipheredResponse, id: id, recommended: recommended)
-    }
 
     private static func videoInfo(from response: VideoInfosResponse, id: String, recommended: [Video]) -> VideoInfo {
         let video = Video(
