@@ -402,33 +402,7 @@ final class PlayerStateManager {
         if !skipRecommendations {
             Task { [weak self] in
                 await self?.fillQueueWithRecommendations(for: video)
-                await self?.prefetchNextUpcoming()
             }
-        } else {
-            prefetchNextUpcoming()
-        }
-    }
-
-    /// Fires `DownloadManager.ensureDownloaded` for just the next queued video, in the background.
-    /// Idempotent: returns instantly if the file is already on disk, and coalesces with any
-    /// existing in-flight download for the same ID, so re-prefetching on every successful play is
-    /// cheap.
-    ///
-    /// **User-gated** by `UserPreferences.prefetchNextInQueue`. Off → no background download
-    /// is started; Next-tap will then fall into the standard `ensureDownloaded` path with
-    /// `.userInitiated` priority (still works, just no head-start).
-    private func prefetchNextUpcoming() {
-        guard preferences.prefetchNextInQueue else {
-            log.debug("prefetch: disabled in settings, skipping")
-            return
-        }
-        guard let next = queue.upcomingItems(count: 1).first else { return }
-        log.info("prefetch: queuing \(next.id, privacy: .public) for background download")
-        Task { [preferredQuality = preferences.preferredQuality] in
-            _ = try? await DownloadManager.shared.ensureDownloaded(
-                video: next,
-                quality: preferredQuality
-            )
         }
     }
 

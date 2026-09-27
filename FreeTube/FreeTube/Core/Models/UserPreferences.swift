@@ -23,11 +23,6 @@ struct UserPreferences {
     /// capturing diagnostic traces from TestFlight / sideload installs where Console.app
     /// access isn't practical. Defaults off — only a handful of users will ever flip this.
     @AppStorage("logToFile") var logToFile: Bool = false
-    /// When true (default), `PlayerStateManager` kicks off a background download of the
-    /// next queue item right after the current video starts playing — so Next-tap is
-    /// instant. Users who want to save bandwidth (or who tend not to advance through the
-    /// queue) can flip this off in Settings.
-    @AppStorage("prefetchNextInQueue") var prefetchNextInQueue: Bool = true
     @AppStorage("restrictedSearchMode") var restrictedSearchMode: Bool = false
     @AppStorage("appearanceMode") var appearanceModeRaw: String = AppearanceMode.system.rawValue
     @AppStorage("downloadCacheLimit") var downloadCacheLimitRaw: String = DownloadCacheLimit.unlimited.rawValue
