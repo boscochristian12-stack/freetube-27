@@ -129,7 +129,6 @@ final class URLDownloadManager {
                 if let job = settled { self.jobs[key] = job }
                 self.taskHandles[key] = nil
                 self.publishExternalSnapshot(originalURL: originalURL, title: media.title, state: .failed(error.localizedDescription))
-                self.scheduleSnapshotRemoval(originalURL: originalURL)
                 self.log.error("[fetch] FAILED key=\(key, privacy: .public): \(String(describing: error), privacy: .public)")
             }
         }
@@ -707,7 +706,7 @@ enum FetchError: Error, LocalizedError {
         case .unsupportedProtocol(let proto): return "Streaming protocol '\(proto)' isn't supported yet."
         case .httpStatus(let code): return "Server returned HTTP \(code)."
         case .cannotWrite(let path): return "Couldn't write to \(path)."
-        case .muxFailed(let exit): return "ffmpeg failed (exit \(exit)). The stream may be DRM-protected."
+        case .muxFailed(let exit): return "FFmpeg failed (exit \(exit)). Check the download log; DRM is only one possible cause."
         }
     }
 }
